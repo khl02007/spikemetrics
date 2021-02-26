@@ -413,7 +413,7 @@ def calculate_pc_metrics(spike_clusters, total_units, pc_features, pc_feature_in
                 nn_hit_rates[idx] = np.nan
                 nn_miss_rates[idx] = np.nan
         else:
-            print(f'Unit {str(cluster_id)} only has ' + str(
+            print(f'Unit {cluster_id} only has ' + str(
                 all_pcs.shape[0]) + ' spikes, which is not enough to compute metric; assigning nan...')
             isolation_distances[idx] = np.nan
             l_ratios[idx] = np.nan
@@ -783,8 +783,16 @@ def nearest_neighbors_metrics(all_pcs, all_labels, this_unit_id, spikes_for_nn, 
 
     Based on metrics described in Chung, Magland et al. (2017) Neuron 95: 1381-1394
 
-    A is a (hopefully) representative subset of cluster X
-    NN_hit(X) = 1/k \sum_i=1^k |{x in A such that ith closest neighbor is in X}| / |A|
+    Rewrite of previous version (more like Chung). Rough logic:
+    1) Randomly sample a set of spikes from the target cluster
+    2) Compute the isolation function with every other cluster (only consider the closest neighbor)
+    3) Take the max of (2); this is the nn_hit_rate
+    4) For now nn_miss_rate is defined as 1 - hit_rate
+
+    Isolation function is defined as:
+    Let A and B be (hopefully) representative subsets of clusters X and Y, respectively.
+    Isolation(X, Y) = |{x in A U B such that rho(x)=rho(closest neighbor of x)}| / |A|
+        where rho(x) is the cluster x belongs to
 
     Inputs:
     -------
@@ -808,29 +816,67 @@ def nearest_neighbors_metrics(all_pcs, all_labels, this_unit_id, spikes_for_nn, 
 
     """
 
-    total_spikes = all_pcs.shape[0]
-    ratio = spikes_for_nn / total_spikes
-    this_unit = all_labels == this_unit_id
+    n_neighbors = 1
 
-    X = np.concatenate((all_pcs[this_unit, :], all_pcs[np.invert(this_unit), :]), 0)
+    all_units_ids = np.unique(all_labels)
+    other_units_ids = np.setdiff1d(all_units_ids, this_unit_id)
 
-    n = np.sum(this_unit)
+    isolation = np.zeros(len(other_units_ids),)
+    for other_unit_id in other_units_ids:
+        n_spikes_target_unit = np.sum(all_labels==this_unit_id)
+        pcs_target_unit = all_pcs[all_labels==this_unit_id, :]
 
-    if ratio < 1:
-        inds = np.arange(0, X.shape[0] - 1, 1 / ratio).astype('int')
-        X = X[inds, :]
-        n = int(n * ratio)
+        n_spikes_other_unit = np.sum(all_labels==other_unit_id)
+        pcs_other_unit = all_pcs[all_labels==other_unit_id]
 
-    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='ball_tree').fit(X)
-    distances, indices = nbrs.kneighbors(X)
+        spikes_for_nn_actual = np.min([n_spikes_target_unit, n_spikes_other_unit, spikes_for_nn])
 
-    this_cluster_inds = np.arange(n)
+        if spikes_for_nn_actual < n_spikes_target_unit:
+            pcs_target_unit_idx = np.random.choice(np.arange(n_spikes_target_unit), size=spikes_for_nn_actual)
+            pcs_target_unit = pcs_target_unit[pcs_target_unit_idx]
 
-    this_cluster_nearest = indices[:n, 1:].flatten()
-    other_cluster_nearest = indices[n:, 1:].flatten()
+        if spikes_for_nn_actual < n_spikes_other_unit:
+            pcs_other_unit_idx = np.random.choice(np.arange(n_spikes_other_unit), size=spikes_for_nn_actual)
+            pcs_other_unit = pcs_other_unit[pcs_other_unit_idx]
 
-    hit_rate = np.mean(this_cluster_nearest < n)
-    miss_rate = np.mean(other_cluster_nearest < n)
+        pcs_concat = np.concatenate((pcs_target_unit, pcs_other_unit), axis=0)
+        label_concat = np.concatenate((np.zeros(spikes_for_nn_actual),np.ones(spikes_for_nn_actual)))
+        
+        _, membership_ind = NearestNeighbors(n_neighbors=n_neighbors, algorithm='auto').fit(
+                            pcs_concat).kneighbors()
+        
+        target_nn_in_target = np.sum(label_concat[membership_ind[:spikes_for_nn_actual]]==0)
+        other_nn_in_other = np.sum(label_concat[membership_ind[spikes_for_nn_actual:]]==1) 
+
+        isolation[other_unit_id==other_units_ids] = (target_nn_in_target + other_nn_in_other) \
+                                                    / (2*spikes_for_nn_actual)
+    hit_rate = np.min(isolation)
+    miss_rate = 1 - hit_rate
+    # total_spikes = all_pcs.shape[0]
+    # ratio = spikes_for_nn / total_spikes
+    # this_unit = all_labels == this_unit_id
+
+    # # all_pcs rearranged so that the spikes that belong to target cluster are at the top
+    # X = np.concatenate((all_pcs[this_unit, :], all_pcs[np.invert(this_unit), :]), 0)
+    # # number of spikes from target cluster
+    # n = np.sum(this_unit)
+
+    # # this seems to sample spikes 
+    # if ratio < 1:
+    #     inds = np.arange(0, X.shape[0] - 1, 1 / ratio).astype('int')
+    #     X = X[inds, :]
+    #     n = int(n * ratio)
+
+    # nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='ball_tree').fit(X)
+    # distances, indices = nbrs.kneighbors(X)
+
+    # this_cluster_inds = np.arange(n)
+
+    # this_cluster_nearest = indices[:n, 1:].flatten()
+    # other_cluster_nearest = indices[n:, 1:].flatten()
+
+    # hit_rate = np.mean(this_cluster_nearest < n)
+    # miss_rate = np.mean(other_cluster_nearest < n)
 
     return hit_rate, miss_rate
 
